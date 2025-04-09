@@ -1,3 +1,6 @@
 # plant_village
 
-A new Flutter project.
+데모 영상
+https://youtu.be/0ZDLq__uQG8
+
+학습 코드 
