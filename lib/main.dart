@@ -23,7 +23,6 @@ void main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-    print("Firebase 초기화 성공");
   } catch (e) {
     print("Firebase 초기화 실패: $e");
     // 초기화 실패 시 사용자에게 알림 또는 다른 처리 필요
@@ -109,7 +108,6 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
   // Firebase Model Downloader를 사용하여 모델 로드 및 인터프리터 생성
   Future<void> _loadModelFromFirebase() async {
     try {
-      print('Firebase에서 모델 다운로드/로드 시작: $_firebaseModelName');
       final FirebaseModelDownloader modelDownloader =
           FirebaseModelDownloader.instance;
 
@@ -125,7 +123,6 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
 
       // 다운로드된 모델 파일 가져오기
       final File modelFile = firebaseModel.file;
-      print('모델 파일 경로: ${modelFile.path}');
 
       // 다운로드된 파일로부터 TFLite Interpreter 로드 (tflite_flutter 사용)
       _interpreter = Interpreter.fromFile(modelFile);
@@ -139,7 +136,7 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
     }
   }
 
-  // 에셋에서 레이블 파일 로드 함수 (변경 없음)
+  // 에셋에서 레이블 파일 로드 함수
   Future<void> _loadLabelsFromAssets() async {
     try {
       final labelData = await rootBundle.loadString('assets/labels.txt');
@@ -149,7 +146,6 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
               .map((label) => label.trim())
               .where((label) => label.isNotEmpty)
               .toList();
-      print('에셋에서 레이블 로드 성공: ${_labels?.length ?? 0}개');
       if (_labels == null || _labels!.isEmpty) {
         throw Exception('레이블 파일이 비어있거나 내용을 읽을 수 없습니다.');
       }
@@ -252,6 +248,50 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
       ).reshape([1, _labels!.length]);
       _interpreter!.run(input, output);
 
+      // 상위 5개 예측 결과 출력 로직 추가/수정
+      // 모델 출력 확률값 리스트 가져오기 (output 형태가 [1, N]이라고 가정)
+      final List<double> probabilities = output[0];
+
+      // (인덱스, 확률) 쌍 리스트 생성
+      List<Map<String, dynamic>> indexedProbabilities = [];
+      for (int i = 0; i < probabilities.length; i++) {
+        indexedProbabilities.add({'index': i, 'prob': probabilities[i]});
+      }
+
+      // 확률 기준으로 내림차순 정렬
+      indexedProbabilities.sort((a, b) => b['prob'].compareTo(a['prob']));
+
+      // 상위 5개 (또는 클래스 개수보다 작으면 그 개수만큼) 추출
+      int topN = 5;
+      List<Map<String, dynamic>> topPredictions =
+          indexedProbabilities.take(topN).toList();
+
+      // 터미널에 상위 5개 결과 출력
+      print("--- Top 5 Predictions ---");
+      for (int i = 0; i < topPredictions.length; i++) {
+        var prediction = topPredictions[i];
+        int index = prediction['index'];
+        double prob = prediction['prob'];
+
+        // 레이블 존재 및 인덱스 유효성 확인
+        if (_labels != null && index >= 0 && index < _labels!.length) {
+          String predictedLabel = _labels![index];
+          List<String> parts = predictedLabel.split('___');
+          String species =
+              parts.length > 0 ? parts[0].replaceAll('_', ' ') : '알 수 없음';
+          String status =
+              parts.length > 1 ? parts[1].replaceAll('_', ' ') : '알 수 없음';
+
+          // 출력 형식: 순위. 종류 (상태): 신뢰도%
+          print(
+            "${i + 1}. ${species} (${status}): ${(prob * 100).toStringAsFixed(2)}%",
+          );
+        } else {
+          print("${i + 1}. Error: Invalid index $index for probability $prob");
+        }
+      }
+      print("-------------------------");
+
       // 5. 결과 처리 및 "식물 아님" 판단 로직 (신뢰도 기반)
       double maxProb = 0.0;
       int predictedIndex = -1;
@@ -312,8 +352,13 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('🌿 식물 상태 진단 (Firebase ML)'),
-        backgroundColor: Colors.deepPurple[400], // 테마 색상 변경 예시
+        title: Text('🌿 식물 상태 진단'),
+        backgroundColor: const Color.fromARGB(
+          255,
+          228,
+          255,
+          230,
+        ), // 테마 색상 변경 예시
       ),
       body: SingleChildScrollView(
         child: Center(
@@ -435,7 +480,12 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                       icon: Icon(Icons.photo_library_outlined),
                       label: Text('갤러리'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.indigo,
+                        backgroundColor: const Color.fromARGB(
+                          255,
+                          216,
+                          241,
+                          215,
+                        ),
                         padding: EdgeInsets.symmetric(
                           horizontal: 20,
                           vertical: 12,
@@ -448,23 +498,6 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                       onPressed:
                           buttonsEnabled
                               ? () => _pickImage(ImageSource.gallery)
-                              : null,
-                    ),
-                    ElevatedButton.icon(
-                      icon: Icon(Icons.camera_alt_outlined),
-                      label: Text('카메라'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.cyan,
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 12,
-                        ),
-                        textStyle: TextStyle(fontSize: 15),
-                        disabledBackgroundColor: Colors.grey.shade300,
-                      ),
-                      onPressed:
-                          buttonsEnabled
-                              ? () => _pickImage(ImageSource.camera)
                               : null,
                     ),
                   ],
