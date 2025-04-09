@@ -1,36 +1,55 @@
 import 'dart:io'; // 파일 입출력
 import 'package:flutter/material.dart'; // 플러터 기본 위젯
 import 'package:flutter/services.dart'; // 에셋 로딩 (rootBundle)
+
+// Firebase 및 ML 관련 패키지
+import 'package:firebase_core/firebase_core.dart'; // Firebase 코어
+import 'package:firebase_ml_model_downloader/firebase_ml_model_downloader.dart'; // Firebase 모델 다운로더
+import 'firebase_options.dart'; // FlutterFire CLI가 생성한 파일 (중요!)
+
+// 이미지 및 TFLite 관련 패키지
 import 'package:image_picker/image_picker.dart'; // 이미지 선택
-import 'package:tflite_flutter/tflite_flutter.dart'; // TFLite 연동
+import 'package:tflite_flutter/tflite_flutter.dart'; // TFLite 연동 (인터프리터 사용 위해 여전히 필요)
 import 'package:image/image.dart' as img; // 이미지 처리 (리사이징, 픽셀 접근)
 
-// 앱 진입점
-void main() {
+// --- 앱 진입점 ---
+void main() async {
+  // main 함수를 async로 변경
   // Flutter 엔진과 위젯 트리가 바인딩되었는지 확인 (플러그인 초기화 전에 필요)
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase 초기화 - 앱 시작 시 필수!
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    print("Firebase 초기화 성공");
+  } catch (e) {
+    print("Firebase 초기화 실패: $e");
+    // 초기화 실패 시 사용자에게 알림 또는 다른 처리 필요
+  }
+
   // 앱 실행
   runApp(MyApp());
 }
 
-// 앱의 루트 위젯 (MaterialApp 설정)
+// --- 앱의 루트 위젯 (MaterialApp 설정) ---
 class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Plant Classifier', // 앱의 제목 (예: 최근 앱 목록)
+      title: 'Plant Classifier (Firebase)', // 앱 제목 변경
       theme: ThemeData(
-        // 앱 테마 설정
-        primarySwatch: Colors.green, // 기본 색상 견본
-        visualDensity: VisualDensity.adaptivePlatformDensity, // 플랫폼별 시각적 밀도 조정
+        primarySwatch: Colors.green,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
-      home: PlantClassifierPage(), // 앱이 시작될 때 보여줄 기본 페이지
-      debugShowCheckedModeBanner: false, // 디버그 배너 숨기기
+      home: PlantClassifierPage(), // 앱 시작 페이지
+      debugShowCheckedModeBanner: false,
     );
   }
 }
 
-// --- 식물 분류기 페이지 위젯 ---
+// --- 식물 분류기 페이지 위젯 (StatefulWidget) ---
 class PlantClassifierPage extends StatefulWidget {
   @override
   _PlantClassifierPageState createState() => _PlantClassifierPageState();
@@ -39,84 +58,115 @@ class PlantClassifierPage extends StatefulWidget {
 // --- 식물 분류기 페이지의 상태 관리 클래스 ---
 class _PlantClassifierPageState extends State<PlantClassifierPage> {
   File? _image; // 선택된 이미지 파일
-  List<String>? _labels; // 모델 레이블 리스트
-  Interpreter? _interpreter; // TFLite 인터프리터
-  String _result = "이미지를 선택해주세요."; // 결과 메시지
-  bool _isLoading = false; // 로딩 상태 플래그
-  final double confidenceThreshold = 0.7; // 신뢰도 임계값 (조정 필요)
+  List<String>? _labels; // 모델 레이블 리스트 (에셋에서 로드)
+  Interpreter? _interpreter; // TFLite 인터프리터 (다운로드된 모델로 생성)
+  String _result = "모델 및 레이블 로딩 중..."; // 초기 상태 메시지 변경
+  bool _isLoading = true; // 초기 로딩 상태 true
+  bool _isModelReady = false; // 모델 준비 완료 여부 플래그
+  final double confidenceThreshold = 0.7; // 신뢰도 임계값
 
-  // 위젯 초기화 시 모델 및 레이블 로드
+  // Firebase 콘솔에 업로드한 모델 이름과 정확히 일치해야 함
+  static const String _firebaseModelName = "plant-village-classifier-v1";
+
+  // 위젯 초기화 시 모델 및 레이블 로드 시도
   @override
   void initState() {
     super.initState();
-    // 비동기 작업인 모델/레이블 로드를 initState에서 호출
-    // 위젯이 완전히 빌드된 후 실행하려면 WidgetsBinding.instance.addPostFrameCallback 사용 가능
-    _loadModel();
-    _loadLabels();
+    _initializeModelAndLabels(); // 모델과 레이블 초기화 함수 호출
   }
 
   // 위젯이 제거될 때 인터프리터 리소스 해제
   @override
   void dispose() {
     _interpreter?.close();
+    print("Interpreter 자원 해제됨");
     super.dispose();
   }
 
-  // TFLite 모델 로드 함수
-  Future<void> _loadModel() async {
-    try {
-      _interpreter = await Interpreter.fromAsset('plant_model.tflite');
-      print('모델 로드 성공');
-      // 모델 로드 후 상태 업데이트가 필요하다면 setState 사용 (여기선 필요 X)
-    } catch (e) {
-      print('모델 로드 실패: $e');
-      if (mounted) {
-        // 위젯이 여전히 화면에 있는지 확인 후 상태 업데이트
-        setState(() {
-          _result = "모델 로딩 실패: $e";
-        });
-      }
+  // 모델과 레이블을 비동기적으로 로드하는 초기화 함수
+  Future<void> _initializeModelAndLabels() async {
+    // 두 작업을 동시에 시작
+    final modelFuture = _loadModelFromFirebase();
+    final labelsFuture = _loadLabelsFromAssets();
+
+    // 두 작업이 모두 완료될 때까지 기다림
+    await Future.wait([modelFuture, labelsFuture]);
+
+    // 모든 로딩 완료 후 상태 업데이트
+    if (mounted) {
+      setState(() {
+        _isLoading = false; // 로딩 완료
+        if (_isModelReady && _labels != null && _labels!.isNotEmpty) {
+          _result = "이미지를 선택해주세요."; // 성공 메시지
+        } else {
+          // 실패 메시지는 각 로드 함수 내부에서 설정됨
+          _result = _result.contains("실패") ? _result : "초기화 실패";
+        }
+      });
     }
   }
 
-  // 레이블 파일 로드 함수
-  Future<void> _loadLabels() async {
+  // Firebase Model Downloader를 사용하여 모델 로드 및 인터프리터 생성
+  Future<void> _loadModelFromFirebase() async {
+    try {
+      print('Firebase에서 모델 다운로드/로드 시작: $_firebaseModelName');
+      final FirebaseModelDownloader modelDownloader =
+          FirebaseModelDownloader.instance;
+
+      // 최신 모델 가져오기 시도 (네트워크 연결 필요할 수 있음)
+      final FirebaseCustomModel firebaseModel = await modelDownloader.getModel(
+        _firebaseModelName,
+        FirebaseModelDownloadType.latestModel, // 항상 최신 버전 시도
+        FirebaseModelDownloadConditions(
+          iosAllowsCellularAccess: true,
+          // androidAllowsCellularAccess: true,
+        ),
+      );
+
+      // 다운로드된 모델 파일 가져오기
+      final File modelFile = firebaseModel.file;
+      print('모델 파일 경로: ${modelFile.path}');
+
+      // 다운로드된 파일로부터 TFLite Interpreter 로드 (tflite_flutter 사용)
+      _interpreter = Interpreter.fromFile(modelFile);
+      print('다운로드된 모델로부터 Interpreter 로드 성공');
+      _isModelReady = true; // 모델 준비 완료
+    } catch (e) {
+      print('Firebase 모델 다운로드 또는 Interpreter 로드 실패: $e');
+      _isModelReady = false;
+      // 에러 발생 시 사용자에게 보여줄 메시지 설정 (setState는 _initializeModelAndLabels 에서 처리)
+      _result = "모델 준비 실패:\n${e.toString()}";
+    }
+  }
+
+  // 에셋에서 레이블 파일 로드 함수 (변경 없음)
+  Future<void> _loadLabelsFromAssets() async {
     try {
       final labelData = await rootBundle.loadString('assets/labels.txt');
-      // 각 줄을 분리하고, 공백 제거 후 비어있지 않은 라인만 리스트로 만듦
       _labels =
           labelData
               .split('\n')
               .map((label) => label.trim())
               .where((label) => label.isNotEmpty)
               .toList();
-      print('레이블 로드 성공: ${_labels?.length ?? 0}개');
+      print('에셋에서 레이블 로드 성공: ${_labels?.length ?? 0}개');
       if (_labels == null || _labels!.isEmpty) {
-        print('경고: 레이블 파일이 비어있거나 로드에 실패했습니다.');
-        if (mounted) {
-          setState(() {
-            _result = "레이블 파일 오류";
-          });
-        }
+        throw Exception('레이블 파일이 비어있거나 내용을 읽을 수 없습니다.');
       }
     } catch (e) {
       print('레이블 로드 실패: $e');
-      if (mounted) {
-        setState(() {
-          _result = "레이블 로딩 실패: $e";
-        });
-      }
+      _labels = null; // 실패 시 null 처리
+      _result = "레이블 파일 로드 실패:\n${e.toString()}";
     }
   }
 
-  // 이미지 선택 함수 (갤러리 또는 카메라)
+  // 이미지 선택 함수 (갤러리 또는 카메라) - 변경 없음
   Future<void> _pickImage(ImageSource source) async {
-    // 로딩 중일 때는 버튼 비활성화되므로 추가 선택 방지
-    if (_isLoading) return;
+    // 모델이 준비되지 않았거나 이미 로딩 중이면 실행하지 않음
+    if (!_isModelReady || _isLoading) return;
 
     final picker = ImagePicker();
     try {
-      // 이미지 품질을 약간 낮춰 메모리 부족 문제 완화 시도 (0-100)
       final pickedFile = await picker.pickImage(
         source: source,
         imageQuality: 60,
@@ -124,15 +174,13 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
 
       if (pickedFile != null) {
         if (mounted) {
-          // 이미지 선택 시 로딩 상태 활성화 및 메시지 변경
           setState(() {
             _image = File(pickedFile.path);
-            _isLoading = true;
+            _isLoading = true; // 추론 시작 전 로딩 상태 활성화
             _result = "분석 중...";
           });
         }
-        // 이미지 선택 후 바로 추론 실행
-        await _runInference();
+        await _runInference(); // 이미지 선택 후 바로 추론 실행
       } else {
         print('이미지 선택이 취소되었습니다.');
       }
@@ -141,23 +189,24 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
       if (mounted) {
         setState(() {
           _result = '이미지 선택 오류: $e';
-          _isLoading = false; // 오류 발생 시 로딩 상태 해제
+          _isLoading = false;
         });
       }
     }
   }
 
-  // 이미지 전처리 및 TFLite 추론 실행 함수
+  // 이미지 전처리 및 TFLite 추론 실행 함수 - **로직 변경 없음**
   Future<void> _runInference() async {
-    // 필수 요소들이 준비되었는지 확인
+    // 필수 요소 확인 (모델 준비 여부 포함)
     if (!mounted ||
         _image == null ||
+        !_isModelReady ||
         _interpreter == null ||
         _labels == null ||
         _labels!.isEmpty) {
       if (mounted) {
         setState(() {
-          _result = "오류: 분석 준비 안됨 (이미지, 모델, 또는 레이블 없음)";
+          _result = "오류: 분석 준비 안됨 (모델 또는 레이블 로드 실패)";
           _isLoading = false;
         });
       }
@@ -166,21 +215,19 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
 
     img.Image? originalImage;
     try {
-      // 1. 이미지 파일 읽고 디코딩
+      // 1. 이미지 로드 및 디코딩
       final imageBytes = await _image!.readAsBytes();
       originalImage = img.decodeImage(imageBytes);
-
       if (originalImage == null) throw Exception('이미지 디코딩 실패');
 
-      // 2. 이미지 리사이징 (모델 입력 크기에 맞게)
+      // 2. 이미지 리사이징
       img.Image resizedImage = img.copyResize(
         originalImage,
         width: 160,
         height: 160,
       );
 
-      // 3. 이미지 정규화 (학습 시 사용한 방식과 동일하게 [-1, 1] 범위로)
-      // 입력 형태: [1, 160, 160, 3] (배치, 높이, 너비, 채널)
+      // 3. 이미지 정규화 ([-1, 1] 범위)
       var input = List.generate(
         1,
         (i) => List.generate(
@@ -188,9 +235,7 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
           (j) => List.generate(160, (k) => List.generate(3, (l) => 0.0)),
         ),
       );
-      var buffer = resizedImage.getBytes(
-        order: img.ChannelOrder.rgb,
-      ); // RGB 순서로 바이트 가져오기
+      var buffer = resizedImage.getBytes(order: img.ChannelOrder.rgb);
       int pixelIndex = 0;
       for (int y = 0; y < 160; y++) {
         for (int x = 0; x < 160; x++) {
@@ -200,19 +245,16 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
         }
       }
 
-      // 4. 모델 추론 실행
-      // 출력 형태: [1, label개수] (예: [1, 38])
+      // 4. 모델 추론 실행 (로드된 _interpreter 사용)
       var output = List.filled(
         1 * _labels!.length,
         0.0,
       ).reshape([1, _labels!.length]);
       _interpreter!.run(input, output);
 
-      // 5. 결과 처리 및 "식물 아님" 판단 로직
+      // 5. 결과 처리 및 "식물 아님" 판단 로직 (신뢰도 기반)
       double maxProb = 0.0;
       int predictedIndex = -1;
-
-      // 가장 높은 확률값과 인덱스 찾기
       for (int i = 0; i < output[0].length; i++) {
         if (output[0][i] > maxProb) {
           maxProb = output[0][i];
@@ -221,12 +263,10 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
       }
 
       String finalResult;
-      // 신뢰도 임계값 이상이고 유효한 인덱스인 경우
       if (predictedIndex != -1 && maxProb >= confidenceThreshold) {
         if (predictedIndex < _labels!.length) {
-          // 레이블 범위 확인
           String predictedLabel = _labels![predictedIndex];
-          List<String> parts = predictedLabel.split('___'); // 레이블 파싱
+          List<String> parts = predictedLabel.split('___');
           String species =
               parts.length > 0 ? parts[0].replaceAll('_', ' ') : '알 수 없음';
           String status =
@@ -239,22 +279,18 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
             "오류: predictedIndex $predictedIndex >= label length ${_labels!.length}",
           );
         }
-      }
-      // 신뢰도 임계값 미만인 경우
-      else if (predictedIndex != -1) {
+      } else if (predictedIndex != -1) {
         finalResult =
             "식물 이미지가 아니거나,\n모델이 확신할 수 없는 이미지입니다.\n(최고 신뢰도: ${(maxProb * 100).toStringAsFixed(1)}%)";
-      }
-      // 예측 인덱스를 찾지 못한 경우 (이론상 발생하기 어려움)
-      else {
+      } else {
         finalResult = "분석 실패: 예측 결과 없음";
       }
 
-      // UI 업데이트 (위젯이 화면에 있을 때만)
+      // UI 업데이트
       if (mounted) {
         setState(() {
           _result = finalResult;
-          _isLoading = false;
+          _isLoading = false; // 추론 완료 후 로딩 상태 해제
         });
       }
     } catch (e) {
@@ -262,37 +298,38 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
       if (mounted) {
         setState(() {
           _result = "오류 발생: ${e.toString()}";
-          _isLoading = false;
+          _isLoading = false; // 오류 발생 시 로딩 상태 해제
         });
       }
     }
   }
 
-  // 위젯 UI 구성
+  // --- 위젯 UI 구성 ---
   @override
   Widget build(BuildContext context) {
+    // 모델/레이블 로딩 중 또는 추론 중일 때 버튼 비활성화 결정
+    bool buttonsEnabled = _isModelReady && !_isLoading;
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('🌿 식물 상태 진단'),
-        backgroundColor: Colors.green[700], // AppBar 색상 변경
+        title: Text('🌿 식물 상태 진단 (Firebase ML)'),
+        backgroundColor: Colors.deepPurple[400], // 테마 색상 변경 예시
       ),
       body: SingleChildScrollView(
-        // 화면 넘칠 경우 스크롤 가능하도록
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(20.0), // 전체적인 여백 추가
+            padding: const EdgeInsets.all(20.0),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 // 이미지 표시 영역
                 Container(
-                  width: double.infinity, // 너비 최대로
-                  height:
-                      MediaQuery.of(context).size.width * 0.7, // 화면 너비의 70% 높이
+                  width: double.infinity,
+                  height: MediaQuery.of(context).size.width * 0.7,
                   decoration: BoxDecoration(
                     border: Border.all(color: Colors.grey.shade400),
                     borderRadius: BorderRadius.circular(12.0),
-                    color: Colors.grey[100], // 배경색 약간 추가
+                    color: Colors.grey[100],
                   ),
                   child:
                       _image == null
@@ -303,15 +340,12 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                             ),
                           )
                           : ClipRRect(
-                            // 이미지가 컨테이너 경계를 넘지 않도록
                             borderRadius: BorderRadius.circular(12.0),
-                            child: Image.file(
-                              _image!,
-                              fit: BoxFit.contain, // 이미지가 잘리지 않도록 contain 사용
-                            ),
+                            child: Image.file(_image!, fit: BoxFit.contain),
                           ),
                 ),
-                SizedBox(height: 25), // 간격 추가
+                SizedBox(height: 25),
+
                 // 결과 표시 영역
                 Container(
                   width: double.infinity,
@@ -323,19 +357,24 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                     color:
                         _isLoading
                             ? Colors.orange[50]
-                            : Colors.green[50], // 로딩 중 배경색 변경
+                            : (_result.contains("실패") || _result.contains("오류")
+                                ? Colors.red[50]
+                                : Colors.green[50]),
                     border: Border.all(
                       color:
                           _isLoading
                               ? Colors.orange.shade200
-                              : Colors.green.shade200,
+                              : (_result.contains("실패") ||
+                                      _result.contains("오류")
+                                  ? Colors.red.shade200
+                                  : Colors.green.shade200),
                     ),
                     borderRadius: BorderRadius.circular(8.0),
                   ),
                   child:
-                      _isLoading
+                      _isLoading &&
+                              !_isModelReady // 초기 로딩 구분
                           ? Row(
-                            // 로딩 인디케이터와 텍스트 표시
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               SizedBox(
@@ -347,7 +386,7 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                               ),
                               SizedBox(width: 15),
                               Text(
-                                _result,
+                                "모델 준비 중...",
                                 style: TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w500,
@@ -355,59 +394,82 @@ class _PlantClassifierPageState extends State<PlantClassifierPage> {
                               ),
                             ],
                           )
-                          : Text(
-                            // 결과 텍스트 표시
-                            _result,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
+                          : (_isLoading // 추론 중 로딩
+                              ? Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 3,
+                                    ),
+                                  ),
+                                  SizedBox(width: 15),
+                                  Text(
+                                    _result,
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              )
+                              : Text(
+                                // 최종 결과 또는 에러 메시지
+                                _result,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              )),
                 ),
-                SizedBox(height: 30), // 간격 추가
+                SizedBox(height: 30),
+
                 // 버튼 영역
                 Row(
-                  mainAxisAlignment:
-                      MainAxisAlignment.spaceEvenly, // 버튼 간격 균등하게
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     ElevatedButton.icon(
                       icon: Icon(Icons.photo_library_outlined),
                       label: Text('갤러리'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.teal, // 버튼 색상
+                        backgroundColor: Colors.indigo,
                         padding: EdgeInsets.symmetric(
                           horizontal: 20,
                           vertical: 12,
                         ),
                         textStyle: TextStyle(fontSize: 15),
+                        // 버튼 활성화/비활성화 상태에 따른 시각적 피드백
+                        disabledBackgroundColor: Colors.grey.shade300,
                       ),
-                      // 로딩 중일 때는 버튼 비활성화 (null 전달)
+                      // 모델 준비 완료되고 로딩 중 아닐 때만 활성화
                       onPressed:
-                          _isLoading
-                              ? null
-                              : () => _pickImage(ImageSource.gallery),
+                          buttonsEnabled
+                              ? () => _pickImage(ImageSource.gallery)
+                              : null,
                     ),
                     ElevatedButton.icon(
                       icon: Icon(Icons.camera_alt_outlined),
                       label: Text('카메라'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blueGrey, // 버튼 색상
+                        backgroundColor: Colors.cyan,
                         padding: EdgeInsets.symmetric(
                           horizontal: 20,
                           vertical: 12,
                         ),
                         textStyle: TextStyle(fontSize: 15),
+                        disabledBackgroundColor: Colors.grey.shade300,
                       ),
-                      // 로딩 중일 때는 버튼 비활성화
                       onPressed:
-                          _isLoading
-                              ? null
-                              : () => _pickImage(ImageSource.camera),
+                          buttonsEnabled
+                              ? () => _pickImage(ImageSource.camera)
+                              : null,
                     ),
                   ],
                 ),
-                SizedBox(height: 20), // 하단 여백
+                SizedBox(height: 20),
               ],
             ),
           ),
