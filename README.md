@@ -10,7 +10,7 @@ PlantVillage 데이터셋의 이미지를 사용하여 식물 질병을 분류�
 
 학습 및 평가 코드는 저장소 내 Jupyter Notebook 파일에서 확인할 수 있습니다:
 파일명: notebooks/FINAL_plant_village_non_preprocessing_ver2
-* [plant_village_code.ipynb](./notebooks/FINAL_plant_village_non_preprocessing_ver2.ipynb)
+* [code.ipynb](./notebooks/FINAL_plant_village_non_preprocessing_ver2.ipynb)
 
 ## 모델 접근 방식 및 비교
 
