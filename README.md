@@ -47,7 +47,9 @@ PlantVillage 데이터셋의 이미지를 사용하여 식물 질병을 분류�
 ### 학습 곡선 시각화
 
 **시도 1 (직접 설계 CNN):**
+
 <img width="713" alt="attempt1" src="https://github.com/user-attachments/assets/b6122496-df53-4a39-a3a4-54f81511201b" />
 
 **시도 2 (VGG16):**
+
 <img width="707" alt="attempt2" src="https://github.com/user-attachments/assets/86a2f761-ead8-42e1-9391-6c552ac8e9ba" />
